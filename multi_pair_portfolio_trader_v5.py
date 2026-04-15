@@ -138,14 +138,15 @@ MIN_POSITION_PCT = float(os.environ.get("MIN_POSITION_PCT", "3.0"))   # Min per 
 PORTFOLIO_DRAWDOWN_LIMIT = 8.0  # Emergency stop at 8% portfolio loss
 
 # Signal Thresholds (ensemble)
-BUY_SIGNAL_THRESHOLD = 0.65  # Composite score >= 65% for entry
-SELL_SIGNAL_THRESHOLD = 0.35  # Composite score <= 35% for exit
+BUY_SIGNAL_THRESHOLD = 0.65 # Composite score >= 65% for entry
+SELL_SIGNAL_THRESHOLD = 0.35 # Composite score <= 35% for exit
 
 # Risk Management
-TRAILING_STOP_PCT = 1.0  # Activate trailing at +2% profit
+TRAILING_STOP_PCT = 2.0 # Activate trailing at +2% profit
 TAKE_PROFIT_PCT_BASE = 3.0
 STOP_LOSS_PCT_BASE = 1.5
-ATR_PERIOD = 14  # For volatility sizing
+ATR_PERIOD = 14 # For volatility sizing
+KELLY_RISK_REWARD_RATIO = float(os.environ.get("KELLY_RR", "3.0")) # Used in Kelly criterion
 
 # State Files
 STATE_FILE = str(Path(__file__).parent / "portfolio_trader_state.json")
@@ -194,6 +195,7 @@ class PortfolioState:
     deployed: float = 0.0
     total_pnl: float = 0.0
     daily_loss: float = 0.0
+    peak_value: float = INITIAL_CAPITAL  # Track actual peak for drawdown calc
     pairs: Dict[str, PairData] = field(default_factory=dict)
     active_positions: Dict[str, Dict] = field(default_factory=dict)
     correlation_matrix: Dict[str, Dict[str, float]] = field(default_factory=dict)
@@ -208,7 +210,7 @@ class PortfolioState:
     })
     trade_history: List[Dict] = field(default_factory=list)
     last_rebalance: float = field(default_factory=time.time)
-    market_regime: str = "NEUTRAL"  # BULL/BEAR/RANGING
+    market_regime: str = "NEUTRAL" # BULL/BEAR/RANGING
 
 # ─── Thinking Process Emitter ─────────────────────────────────────
 
@@ -748,10 +750,15 @@ class PortfolioRiskManager:
         
         final_size = max(min_position, min(max_position, target_position))
         
-        # 5. Available capital check
+        # 5. Available capital check - enforce we never exceed available
+        if final_size > self.portfolio.available * 0.95:
+            # Reduce to 95% of available (leave buffer for fees)
+            final_size = self.portfolio.available * 0.95
+        
+        # Also reduce if portfolio is running low on cash
         available_pct = self.portfolio.available / INITIAL_CAPITAL
-        if available_pct < 0.1:  # Less than 10% left
-            final_size *= 0.5  # Reduce new positions
+        if available_pct < 0.1: # Less than 10% left
+            final_size *= 0.5 # Reduce new positions
         
         think.add_thought_node(
             node_type="position_sizing",
@@ -777,16 +784,20 @@ class PortfolioRiskManager:
         """
         think.data_source_access("Health Monitor")
         
-        # Check drawdown
+        # Check drawdown using actual peak value
         unrealized = sum(
             pos.get("unrealized_pnl", 0) 
             for pos in self.portfolio.active_positions.values()
         )
         total_value = self.portfolio.capital + unrealized
-        max_value = self.portfolio.capital * 1.05  # Assume could have been +5%
         
-        if max_value > 0:
-            drawdown = (max_value - total_value) / max_value * 100
+        # Update peak value if we're at a new high
+        if total_value > self.portfolio.peak_value:
+            self.portfolio.peak_value = total_value
+        
+        peak = self.portfolio.peak_value
+        if peak > 0:
+            drawdown = (peak - total_value) / peak * 100
             if drawdown > PORTFOLIO_DRAWDOWN_LIMIT:
                 return False, f"Portfolio drawdown {drawdown:.1f}% > limit {PORTFOLIO_DRAWDOWN_LIMIT}%"
         
