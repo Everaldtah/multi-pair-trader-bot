@@ -816,8 +816,10 @@ class PortfolioRiskManager:
             for p2 in pair_list[i+1:]:
                 if len(p1.price_history) > 20 and len(p2.price_history) > 20:
                     # Calculate correlation of returns
-                    returns1 = np.diff(p1.price_history[-20:]) / p1.price_history[-21:-1]
-                    returns2 = np.diff(p2.price_history[-20:]) / p2.price_history[-21:-1]
+                    prices1 = np.array(p1.price_history[-21:])
+                    prices2 = np.array(p2.price_history[-21:])
+                    returns1 = np.diff(prices1) / prices1[:-1]
+                    returns2 = np.diff(prices2) / prices2[:-1]
                     if len(returns1) == len(returns2):
                         corr = np.corrcoef(returns1, returns2)[0, 1]
                         if not np.isnan(corr):
